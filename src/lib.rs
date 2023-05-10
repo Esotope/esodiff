@@ -117,7 +117,5 @@ pub fn patch_crate_using_file<T: Into<PathFinder>>(
         repository
             .apply(&diff_file, git2::ApplyLocation::WorkDir, None)
             .unwrap();
-    } else {
-        panic!("NOPE");
     }
 }
