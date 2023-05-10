@@ -7,41 +7,9 @@ use std::{
     fs,
     io::{self, BufReader, BufWriter},
     path::{Path, PathBuf},
+    env
 };
-
-pub struct PathFinder {
-    pub path: PathBuf,
-}
-
-impl Into<PathFinder> for &str {
-    fn into(self) -> PathFinder {
-        PathFinder {
-            path: PathBuf::from(self),
-        }
-    }
-}
-
-impl Into<PathFinder> for String {
-    fn into(self) -> PathFinder {
-        PathFinder {
-            path: PathBuf::from(self),
-        }
-    }
-}
-
-impl Into<PathFinder> for PathBuf {
-    fn into(self) -> PathFinder {
-        PathFinder { path: self }
-    }
-}
-
-impl Into<PathFinder> for &Path {
-    fn into(self) -> PathFinder {
-        PathFinder {
-            path: PathBuf::from(self),
-        }
-    }
-}
+use serde::Deserialize;
 
 fn create_dirs(path: PathBuf) {
     let mut path = path.clone();
@@ -60,21 +28,18 @@ fn create_dirs(path: PathBuf) {
     }
 }
 
-pub fn patch_crate_using_file<T: Into<PathFinder>>(
+fn patch_crate_using_file(
     crate_name: String,
     version: String,
-    input_diff_file: T,
-    output_dir: T,
+    input_diff_file: String,
+    output_dir: String,
 ) {
     let diff_file = {
-        let diff_file: PathFinder = input_diff_file.into();
-        let diff_contents = fs::read(diff_file.path).unwrap();
+        let new_path = PathBuf::from(input_diff_file);
+        let diff_contents = fs::read(new_path).unwrap();
         git2::Diff::from_buffer(&diff_contents[..]).unwrap()
     };
-    let root_path = {
-        let dir: PathFinder = output_dir.into();
-        dir.path
-    };
+    let root_path = PathBuf::from(output_dir);
     let test_path = {
         let mut new_path = root_path.clone();
         new_path.push(format!("{}-{}", crate_name, version));
@@ -117,5 +82,24 @@ pub fn patch_crate_using_file<T: Into<PathFinder>>(
         repository
             .apply(&diff_file, git2::ApplyLocation::WorkDir, None)
             .unwrap();
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct TomlInputs {
+    packages: toml::Table
+}
+
+fn main() {
+    let mut esodiff_path = env::current_dir().unwrap();
+    esodiff_path.push("esodiff.toml");
+    let esodiff = fs::read(esodiff_path).unwrap();
+    let esodiff = String::from_utf8(esodiff).unwrap();
+    let esodiff: TomlInputs = toml::from_str(esodiff.as_str()).unwrap();
+    for (crate_name, values) in esodiff.packages {
+        let version = values.get("version").unwrap().as_str().unwrap();
+        let patch = values.get("patch").unwrap().as_str().unwrap();
+        let output = values.get("output").unwrap().as_str().unwrap();
+        patch_crate_using_file(crate_name, version.into(), patch.into(), output.into());
     }
 }
