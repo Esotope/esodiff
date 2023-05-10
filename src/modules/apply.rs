@@ -15,7 +15,7 @@ struct TomlInputs {
     packages: toml::Table,
 }
 
-pub fn run(args: crate::Arguments) {
+pub fn run(args: crate::arguments::Arguments) {
 
     let mut esodiff_path = env::current_dir().unwrap();
     if args.diff_file.is_none() {
