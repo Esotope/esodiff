@@ -3,103 +3,248 @@
 // This software is released under the MIT License.
 // https://opensource.org/licenses/MIT
 
-use std::{
-    fs,
-    io::{self, BufReader, BufWriter},
-    path::{Path, PathBuf},
-    env
-};
-use serde::Deserialize;
+use std::{env::args, path::PathBuf};
 
-fn create_dirs(path: PathBuf) {
-    let mut path = path.clone();
-    let mut path_list: Vec<PathBuf> = Vec::new();
-    loop {
-        // path_list.push(path);
-        if fs::read_dir(&path).is_ok() {
-            break;
-        } else {
-            path_list.push((&path).to_owned());
-            path.pop();
+mod modules;
+
+#[derive(Debug, Clone)]
+pub struct Arguments {
+    pub command: Option<String>,
+    pub diff_file: Option<PathBuf>,
+}
+
+impl Arguments {
+    fn new() -> Self {
+        Arguments {
+            command: None,
+            diff_file: None,
         }
-    }
-    for i in 0..path_list.len() {
-        fs::create_dir(&path_list[path_list.len() - 1 - i]).unwrap();
     }
 }
 
-fn patch_crate_using_file(
-    crate_name: String,
-    version: String,
-    input_diff_file: String,
-    output_dir: String,
-) {
-    let diff_file = {
-        let new_path = PathBuf::from(input_diff_file);
-        let diff_contents = fs::read(new_path).unwrap();
-        git2::Diff::from_buffer(&diff_contents[..]).unwrap()
-    };
-    let root_path = PathBuf::from(output_dir);
-    let test_path = {
-        let mut new_path = root_path.clone();
-        new_path.push(format!("{}-{}", crate_name, version));
-        new_path
-    };
-    if fs::read_dir(test_path).is_err() {
-        let raw_file = reqwest::blocking::get(format!(
-            "https://crates.io/api/v1/crates/{}/{}/download",
-            crate_name, version
-        ))
-        .unwrap();
-        let raw_file = raw_file.bytes().unwrap().to_vec();
-        let mut raw_file = BufReader::new(&raw_file[..]);
+#[derive(Debug, Clone)]
+struct ArgumentError {
+    pub id: u32,
+    pub index: u32,
+}
 
-        let mut raw_tar: Vec<u8> = Vec::new();
-        let mut raw_tar_writer = BufWriter::new(&mut raw_tar);
+#[derive(Debug, Clone)]
+struct Argument {
+    pub name: String,
+    pub value_type: u32,
+    pub needs_query: bool,
+    pub value_as_string: Option<String>,
+    pub value_as_u32: Option<u32>,
+    pub value_as_bool: Option<bool>,
+}
 
-        let mut decoder = libflate::gzip::Decoder::new(&mut raw_file).unwrap();
-        io::copy(&mut decoder, &mut raw_tar_writer).unwrap();
-        drop(raw_tar_writer);
-        let raw_tar_reader = BufReader::new(&raw_tar[..]);
+struct ArgumentInput {
+    pub value_type: u32,
+    pub value_as_string: Option<String>,
+    pub value_as_u32: Option<u32>,
+    pub value_as_bool: Option<bool>,
+}
 
-        let mut repository = root_path.clone();
-        repository.push(format!("{}-{}", crate_name, version));
-        create_dirs((&repository).to_owned());
-        let repository = git2::Repository::init(repository.to_str().unwrap()).unwrap();
-
-        let mut archive = tar::Archive::new(raw_tar_reader);
-        for item in archive.entries().unwrap() {
-            let mut item = item.unwrap();
-            let header = item.header();
-            let mut item_path = root_path.clone();
-            item_path.push(header.path().unwrap());
-            let item_name = String::from((&item_path).file_name().unwrap().to_str().unwrap());
-            item_path.pop();
-            create_dirs((&item_path).to_owned());
-            item_path.push(item_name);
-            item.unpack(item_path).unwrap();
+impl From<String> for ArgumentInput {
+    fn from(value: String) -> Self {
+        ArgumentInput {
+            value_type: 1,
+            value_as_string: Some(value.clone()),
+            value_as_u32: None,
+            value_as_bool: None,
         }
-        repository
-            .apply(&diff_file, git2::ApplyLocation::WorkDir, None)
-            .unwrap();
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct TomlInputs {
-    packages: toml::Table
+impl From<u32> for ArgumentInput {
+    fn from(value: u32) -> Self {
+        ArgumentInput {
+            value_type: 1,
+            value_as_string: None,
+            value_as_u32: Some(value.clone()),
+            value_as_bool: None,
+        }
+    }
+}
+
+impl From<bool> for ArgumentInput {
+    fn from(value: bool) -> Self {
+        ArgumentInput {
+            value_type: 1,
+            value_as_string: None,
+            value_as_u32: None,
+            value_as_bool: Some(value.clone()),
+        }
+    }
+}
+
+impl Argument {
+    fn new() -> Self {
+        Argument {
+            name: String::new(),
+            value_type: 0,
+            needs_query: false,
+            value_as_string: None,
+            value_as_u32: None,
+            value_as_bool: None,
+        }
+    }
+
+    fn set_argument_type(&mut self, item_type: &str) {
+        match item_type {
+            "diff" => {
+                self.name = "diff".into();
+                self.value_type = 1;
+                self.needs_query = true;
+            }
+            "command" => {
+                self.name = "command".into();
+                self.value_type = 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn set_value<T: Into<ArgumentInput>>(&mut self, value: T) {
+        let value: ArgumentInput = value.into();
+        match value.value_type {
+            1 => {
+                self.value_type = 1;
+                self.value_as_string = value.value_as_string;
+            }
+            2 => {
+                self.value_type = 2;
+                self.value_as_u32 = value.value_as_u32;
+            }
+            3 => {
+                self.value_type = 3;
+                self.value_as_bool = value.value_as_bool;
+            }
+            _ => {}
+        }
+    }
+
+    fn reset(&mut self) {
+        self.name = String::new();
+        self.value_type = 0;
+        self.needs_query = false;
+        self.value_as_string = None;
+        self.value_as_u32 = None;
+        self.value_as_bool;
+    }
+}
+
+fn handle_args() -> Result<Arguments, ArgumentError> {
+    let args = args().collect::<Vec<String>>();
+    let mut parsed_args: Vec<Argument> = Vec::new();
+    let mut active_parsing_arg = Argument::new();
+    let mut positional_arguments: u32 = 0;
+    for (arg_id, arg) in args.iter().enumerate() {
+        let arg = arg.to_owned();
+        if arg_id > 0 {
+            if !active_parsing_arg.needs_query {
+                if arg.starts_with("-") {
+                    if !arg.contains("=") {
+                        match arg.as_str() {
+                            "--diff" | "-d" => {
+                                active_parsing_arg.set_argument_type("diff");
+                            }
+                            _ => {
+                                return Err(ArgumentError {
+                                    id: 1,
+                                    index: arg_id as u32,
+                                })
+                            }
+                        }
+                    } else {
+                        let root_arg = (&arg)
+                            .split("=")
+                            .map(|f| String::from(f))
+                            .collect::<Vec<String>>()
+                            .get(0)
+                            .unwrap()
+                            .to_owned();
+                        let arg_input = (&arg)
+                            .split("=")
+                            .map(|f| String::from(f))
+                            .collect::<Vec<String>>()
+                            .get(1)
+                            .unwrap()
+                            .to_owned();
+                        match root_arg.as_str() {
+                            "--diff" | "-d" => {
+                                active_parsing_arg.set_argument_type("diff");
+                                active_parsing_arg.set_value(arg_input);
+                                parsed_args.push(active_parsing_arg.clone());
+                                active_parsing_arg.reset();
+                            }
+                            _ => {
+                                return Err(ArgumentError {
+                                    id: 1,
+                                    index: arg_id as u32,
+                                })
+                            }
+                        }
+                    }
+                } else {
+                    if positional_arguments == 0 {
+                        active_parsing_arg.set_argument_type("command");
+                        active_parsing_arg.set_value(arg);
+                        parsed_args.push(active_parsing_arg.clone());
+                        active_parsing_arg.reset();
+                        positional_arguments += 1;
+                    } else {
+                        return Err(ArgumentError {
+                            id: 2,
+                            index: arg_id as u32,
+                        });
+                    }
+                }
+            } else {
+                let value_type = active_parsing_arg.value_type;
+                match value_type {
+                    1 => {
+                        active_parsing_arg.set_value(arg);
+                    }
+                    _ => {}
+                }
+                parsed_args.push(active_parsing_arg.clone());
+                active_parsing_arg.reset();
+            }
+        }
+    }
+    let mut final_args = Arguments::new();
+    for item in parsed_args {
+        match item.name.as_str() {
+            "command" => {
+                final_args.command = item.value_as_string;
+            }
+            "diff" => {
+                final_args.diff_file = Some(PathBuf::from(item.value_as_string.unwrap()));
+            }
+            _ => {}
+        }
+    }
+    Ok(final_args)
 }
 
 fn main() {
-    let mut esodiff_path = env::current_dir().unwrap();
-    esodiff_path.push("esodiff.toml");
-    let esodiff = fs::read(esodiff_path).unwrap();
-    let esodiff = String::from_utf8(esodiff).unwrap();
-    let esodiff: TomlInputs = toml::from_str(esodiff.as_str()).unwrap();
-    for (crate_name, values) in esodiff.packages {
-        let version = values.get("version").unwrap().as_str().unwrap();
-        let patch = values.get("patch").unwrap().as_str().unwrap();
-        let output = values.get("output").unwrap().as_str().unwrap();
-        patch_crate_using_file(crate_name, version.into(), patch.into(), output.into());
+    let args = handle_args();
+    if args.is_err() {
+        panic!("Uhoh! Invalid arguments! Issue: {:?}", args.err().unwrap());
+    } else {
+        let args = args.unwrap();
+        if (&args).command.as_ref().is_some() {
+            match (&args).command.as_ref().unwrap().as_str() {
+                "apply" => {
+                    modules::apply(args);
+                }
+                _ => {
+                    panic!("Uhoh! Invalid command!");
+                }
+            }
+        } else {
+            panic!("Uhoh! No command was specified!");
+        }
     }
 }
